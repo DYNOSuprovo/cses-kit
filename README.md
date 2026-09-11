@@ -97,17 +97,22 @@ In VS Code / Cursor, open `sol.cpp` or `sol.py` and press **Cmd+Shift+B**, or
 
 ## Contributing
 
-PRs welcome. Useful directions (also as
-[issues](https://github.com/yatharthsol090/cses-kit/issues)):
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
+the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-- More languages: `LANG_BY_EXT` in `scripts/cses_lib.py`, a `run.sh` branch, a
-  template. Keep C++17 working.
-- Extra starters under `templates/`.
-- `status`, stress tests, a local TLE timeout, or a public-page leaderboard /
-  profile view.
+Look at [open issues](https://github.com/yatharthsol090/cses-kit/issues) first
+(especially `good first issue`). Setup is the same as above: clone, `chmod +x
+cses scripts/run.sh`, then `./cses` from the repo root.
 
-Keep `.env`, `.cses/`, and `problems/` out of git. Prefer stdlib + `curl`.
-Leave the 0.2s delay (or gentler) on bulk fetches.
+Run tests from the repo root:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Behavior changes should include matching tests in `tests/`. Keep `.env`,
+`.cses/`, and `problems/` out of git. Prefer stdlib + `curl`. Leave the 0.2s
+delay (or gentler) on bulk fetches.
 
 ## License
 

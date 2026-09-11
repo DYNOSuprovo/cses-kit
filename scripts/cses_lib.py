@@ -430,8 +430,8 @@ def is_problem_dir(path: str) -> bool:
 
 
 def problem_from_cwd(start: str | None = None) -> str | None:
-    cur = os.path.abspath(start or os.getcwd())
-    root = os.path.abspath(repo_root())
+    cur = os.path.realpath(start or os.getcwd())
+    root = os.path.realpath(repo_root())
     problems = os.path.join(root, "problems")
     while True:
         if is_problem_dir(cur) and (
