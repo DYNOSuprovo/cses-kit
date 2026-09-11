@@ -7,6 +7,7 @@ import unittest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+@unittest.skipIf(os.name == "nt", "run.sh requires a POSIX environment")
 class RunShTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
