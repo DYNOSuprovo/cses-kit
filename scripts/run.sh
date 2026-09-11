@@ -1,32 +1,53 @@
 #!/usr/bin/env bash
-# Compile a CSES solution and run it against every test case in its tests/ dir.
+# Run a CSES solution against every test case in its tests/ dir.
 #
 # Usage:
-#   scripts/run.sh <problem-dir>        # compile + run all tests
-#   scripts/run.sh <problem-dir> -i     # compile, then read from stdin (interactive)
+#   scripts/run.sh <problem-dir>        # compile (C++) or interpret (Python) + test
+#   scripts/run.sh <problem-dir> -i     # then read from stdin (interactive)
+#   scripts/run.sh <dir>/sol.py         # force Python even if sol.cpp exists
 #
-# A "problem-dir" is a folder containing sol.cpp and a tests/ subfolder with
-# matching pairs like tests/1.in and tests/1.out.
+# Picks sol.py when sol.cpp is missing or still the empty template; otherwise C++.
 set -euo pipefail
 
 # Resolve repo root (this script lives in <root>/scripts).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: scripts/run.sh <problem-dir> [-i]" >&2
+  echo "usage: scripts/run.sh <problem-dir-or-source> [-i]" >&2
   exit 1
 fi
 
-PROB="$1"
+ARG="$1"
 MODE="${2:-test}"
 
-SRC="$PROB/sol.cpp"
+if [[ -f "$ARG" ]]; then
+  SRC="$ARG"
+  PROB="$(cd "$(dirname "$ARG")" && pwd)"
+else
+  PROB="$ARG"
+  if [[ -f "$PROB/sol.py" ]] && { [[ ! -f "$PROB/sol.cpp" ]] || grep -q 'your solution goes here' "$PROB/sol.cpp"; }; then
+    SRC="$PROB/sol.py"
+  else
+    SRC="$PROB/sol.cpp"
+  fi
+fi
+
 if [[ ! -f "$SRC" ]]; then
   echo "error: $SRC not found" >&2
   exit 1
 fi
 
 BIN="$PROB/sol"
+RUN=()
+ext="${SRC##*.}"
+if [[ "$ext" == "py" ]]; then
+  RUN=(python3 "$SRC")
+elif [[ "$ext" == "cpp" || "$ext" == "cc" || "$ext" == "cxx" ]]; then
+  RUN=("$BIN")
+else
+  echo "error: unsupported solution: $SRC" >&2
+  exit 1
+fi
 
 # Colors (fall back to empty strings if not a TTY).
 if [[ -t 1 ]]; then
@@ -35,15 +56,19 @@ else
   RED=""; GRN=""; YEL=""; DIM=""; RST=""
 fi
 
-echo "${DIM}compiling $SRC ...${RST}"
-g++ -std=gnu++17 -O2 -Wall -Wextra -Wshadow \
-    -D_GLIBCXX_ASSERTIONS -fsanitize=address,undefined \
-    -I "$ROOT/include" "$SRC" -o "$BIN"
+if [[ "$ext" == "py" ]]; then
+  echo "${DIM}python3 $SRC ...${RST}"
+else
+  echo "${DIM}compiling $SRC ...${RST}"
+  g++ -std=gnu++17 -O2 -Wall -Wextra -Wshadow \
+      -D_GLIBCXX_ASSERTIONS -fsanitize=address,undefined \
+      -I "$ROOT/include" "$SRC" -o "$BIN"
+fi
 
-# Interactive mode: just run the binary with your keyboard as input.
+# Interactive mode: just run with your keyboard as input.
 if [[ "$MODE" == "-i" ]]; then
   echo "${DIM}running (type input, Ctrl-D to end):${RST}"
-  "$BIN"
+  "${RUN[@]}"
   exit $?
 fi
 
@@ -51,7 +76,7 @@ shopt -s nullglob
 INPUTS=("$PROB"/tests/*.in)
 if [[ ${#INPUTS[@]} -eq 0 ]]; then
   echo "${YEL}no test cases in $PROB/tests/ — running once with no input:${RST}"
-  "$BIN" || true
+  "${RUN[@]}" || true
   exit 0
 fi
 
@@ -62,7 +87,7 @@ for in in "${INPUTS[@]}"; do
 
   # Time the run (seconds, portable).
   start=$(date +%s.%N)
-  got="$("$BIN" < "$in" 2>/tmp/cses_stderr || true)"
+  got="$("${RUN[@]}" < "$in" 2>/tmp/cses_stderr || true)"
   end=$(date +%s.%N)
   ms=$(printf "%.0f" "$(echo "($end - $start) * 1000" | bc)")
 
@@ -78,13 +103,15 @@ for in in "${INPUTS[@]}"; do
     echo "${GRN}✓ $name${RST}  ${DIM}(${ms}ms)${RST}"
     ((pass++)) || true
   else
-    echo "${RED}✗ $name${RST}  ${DIM}(${ms}ms)${RST}"
-    echo "    ${DIM}--- expected ---${RST}"
+    echo "${RED}================================================${RST}"
+    echo "${RED}Test ${name}  FAIL  (${ms}ms)${RST}"
+    echo "${RED}================================================${RST}"
+    echo "  expected"
     sed 's/^/    /' "$exp"
-    echo "    ${DIM}--- got ---${RST}"
+    echo "  got"
     echo "$got" | sed 's/^/    /'
     if [[ -s /tmp/cses_stderr ]]; then
-      echo "    ${DIM}--- stderr ---${RST}"
+      echo "  stderr"
       sed 's/^/    /' /tmp/cses_stderr
     fi
     ((fail++)) || true

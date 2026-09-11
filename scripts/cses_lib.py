@@ -6,13 +6,11 @@ import html
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.parse
-import urllib.request
 from typing import Iterable
 
 UA = "Mozilla/5.0 (cses-local)"
@@ -28,9 +26,13 @@ CATEGORY_SLUGS = {
     "Introductory Problems": "introductory",
 }
 
-# CSES form values for this repo's default language (g++ -std=c++17).
-DEFAULT_LANG = "C++"
-DEFAULT_OPTION = "C++17"
+# CSES <select name="lang|option"> values from the submit form.
+LANG_BY_EXT = {
+    ".cpp": ("C++", "C++17"),
+    ".cc": ("C++", "C++17"),
+    ".cxx": ("C++", "C++17"),
+    ".py": ("Python3", "PyPy3"),
+}
 
 
 def repo_root() -> str:
@@ -92,7 +94,7 @@ def ensure_session(cookie_file: str | None = None) -> str:
     nick, password = env_credentials()
     if not nick or not password:
         raise CurlError(
-            "not logged in — set CSES_NICK and CSES_PASS in .env, or run scripts/login.sh"
+            "not logged in — set CSES_NICK and CSES_PASS in .env, or run: cses login"
         )
     print("logging in from .env …", flush=True)
     return login(nick, password, cookie_file=cookie_file)
@@ -100,6 +102,19 @@ def ensure_session(cookie_file: str | None = None) -> str:
 
 def template_cpp() -> str:
     return os.path.join(repo_root(), "template.cpp")
+
+
+def template_py() -> str:
+    return os.path.join(repo_root(), "template.py")
+
+
+def template_for(path: str) -> str | None:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".cpp", ".cc", ".cxx"}:
+        return template_cpp()
+    if ext == ".py":
+        return template_py()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -198,20 +213,11 @@ def fetch(url: str, *, cookie_file: str | None = None, retries: int = 3) -> str:
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(0.4 * (attempt + 1))
-    # urllib fallback (usually fails TLS on python.org macOS builds)
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
-            return r.read().decode("utf-8", "replace")
-    except Exception:
-        raise last  # type: ignore[misc]
+    raise last  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
-# Statement parsing (same conversion used by fetch.py)
+# Statement parsing
 # ---------------------------------------------------------------------------
 
 def slice_between(s: str, start_pat: str, end: str) -> str:
@@ -394,14 +400,8 @@ def task_id_from_text(text: str) -> str | None:
 
 def existing_problems() -> dict[str, str]:
     """Map CSES task id -> problem directory, from existing statement.md files."""
-    root = os.path.join(repo_root(), "problems")
     found: dict[str, str] = {}
-    if not os.path.isdir(root):
-        return found
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != "tests"]
-        if "statement.md" not in filenames:
-            continue
+    for dirpath in iter_problem_dirs():
         path = os.path.join(dirpath, "statement.md")
         try:
             text = open(path, encoding="utf-8", errors="replace").read()
@@ -411,6 +411,105 @@ def existing_problems() -> dict[str, str]:
         if tid:
             found[tid] = dirpath
     return found
+
+
+def iter_problem_dirs() -> list[str]:
+    root = os.path.join(repo_root(), "problems")
+    out: list[str] = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "tests"]
+        if "statement.md" in filenames:
+            out.append(dirpath)
+    return out
+
+
+def is_problem_dir(path: str) -> bool:
+    return os.path.isdir(path) and os.path.isfile(os.path.join(path, "statement.md"))
+
+
+def problem_from_cwd(start: str | None = None) -> str | None:
+    cur = os.path.abspath(start or os.getcwd())
+    root = os.path.abspath(repo_root())
+    problems = os.path.join(root, "problems")
+    while True:
+        if is_problem_dir(cur) and (
+            cur == problems or cur.startswith(problems + os.sep)
+        ):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur or os.path.abspath(cur) == root:
+            return None
+        cur = parent
+
+
+def find_problem(spec: str | None) -> tuple[str, str | None]:
+    """Resolve a folder, slug, or source file to (problem_dir, source_or_None)."""
+    if spec in (None, "", "."):
+        d = problem_from_cwd()
+        if not d:
+            raise CurlError(
+                "not in a problem folder — pass a slug (trailing-zeroes) or a path"
+            )
+        return d, None
+
+    if os.path.isfile(spec):
+        path = os.path.abspath(spec)
+        parent = os.path.dirname(path)
+        if is_problem_dir(parent):
+            return parent, path
+        raise CurlError(f"not a problem folder: {parent}")
+
+    if os.path.isdir(spec):
+        path = os.path.abspath(spec)
+        if is_problem_dir(path):
+            return path, None
+        walked = problem_from_cwd(path)
+        if walked:
+            return walked, None
+
+    want = spec.strip().rstrip("/").replace("\\", "/")
+    file_hint = None
+    for extra in ("sol.py", "sol.cpp", "sol.cc", "sol.cxx"):
+        if want == extra or want.endswith("/" + extra):
+            file_hint = extra
+            want = want[: -len(extra)].rstrip("/")
+            break
+    if file_hint and not want:
+        d = problem_from_cwd()
+        if not d:
+            raise CurlError(
+                "not in a problem folder — pass a slug (trailing-zeroes) or a path"
+            )
+        src = os.path.join(d, file_hint)
+        if not os.path.isfile(src):
+            raise CurlError(f"no {file_hint} in {d}")
+        return d, src
+
+    matches: list[str] = []
+    problems_root = os.path.join(repo_root(), "problems")
+    for d in iter_problem_dirs():
+        slug = os.path.basename(d)
+        rel = os.path.relpath(d, problems_root).replace("\\", "/")
+        if want in (slug, rel, rel.split("/", 1)[-1]):
+            matches.append(d)
+    # unique
+    seen: list[str] = []
+    for d in matches:
+        if d not in seen:
+            seen.append(d)
+    if len(seen) == 1:
+        if file_hint:
+            src = os.path.join(seen[0], file_hint)
+            if not os.path.isfile(src):
+                raise CurlError(f"no {file_hint} in {seen[0]}")
+            return seen[0], src
+        return seen[0], None
+    if len(seen) > 1:
+        listing = "\n".join(f"  {os.path.relpath(d, repo_root())}" for d in seen)
+        raise CurlError(f"ambiguous {spec!r}:\n{listing}")
+    raise CurlError(f"no problem matching {spec!r}")
 
 
 def unique_dir(category: str, slug: str, taken: Iterable[str]) -> str:
@@ -504,19 +603,59 @@ def task_id_from_problem_dir(prob_dir: str) -> str:
             return tid
     raise CurlError(
         f"no CSES task id in {stmt} — fetch the statement first "
-        f"(python3 scripts/fetch.py <url> {prob_dir})"
+        f"(cses fetch <url> {prob_dir})"
     )
 
 
 def sol_looks_like_template(sol_path: str) -> bool:
     try:
         src = open(sol_path, encoding="utf-8", errors="replace").read()
-        tmpl = open(template_cpp(), encoding="utf-8", errors="replace").read()
     except OSError:
         return False
+    tmpl_path = template_for(sol_path)
+    tmpl = ""
+    if tmpl_path:
+        try:
+            tmpl = open(tmpl_path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            tmpl = ""
+
     def norm(s: str) -> str:
         return re.sub(r"\s+", "", s)
-    return norm(src) == norm(tmpl) or "your solution goes here" in src
+
+    return (tmpl and norm(src) == norm(tmpl)) or "your solution goes here" in src
+
+
+def pick_source_file(prob_dir: str) -> str:
+    """Prefer a real sol.py over an untouched sol.cpp from sync."""
+    cpp = os.path.join(prob_dir, "sol.cpp")
+    py = os.path.join(prob_dir, "sol.py")
+    cpp_ok = os.path.isfile(cpp)
+    py_ok = os.path.isfile(py)
+    if py_ok and (not cpp_ok or sol_looks_like_template(cpp)):
+        return py
+    if cpp_ok:
+        return cpp
+    if py_ok:
+        return py
+    raise CurlError(f"no sol.cpp or sol.py in {prob_dir}")
+
+
+def resolve_source(
+    prob_dir: str,
+    source: str | None = None,
+    lang: str | None = None,
+    option: str | None = None,
+) -> tuple[str, str, str]:
+    """Return (source_path, CSES lang, CSES option)."""
+    path = os.path.abspath(source) if source else pick_source_file(prob_dir)
+    if not os.path.isfile(path):
+        raise CurlError(f"no solution file: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in LANG_BY_EXT:
+        raise CurlError(f"unsupported solution type: {path}")
+    auto_lang, auto_opt = LANG_BY_EXT[ext]
+    return path, lang or auto_lang, option or auto_opt
 
 
 def strip_tags(s: str) -> str:
@@ -729,16 +868,29 @@ def write_submit_report(
         lines.append("")
     failed = [d for d in details if str(d.get("verdict", "")).upper() != "ACCEPTED"]
     passed = [d for d in details if str(d.get("verdict", "")).upper() == "ACCEPTED"]
-    if failed:
+
+    def has_io(d: dict[str, str]) -> bool:
+        return any(d.get(k) for k in ("input", "expected", "got", "feedback"))
+
+    with_io = [d for d in details if has_io(d)]
+    if with_io:
+        lines.append(f"Tests with I/O ({len(with_io)})")
+        lines.append("")
+        for d in with_io:
+            t = times.get(d["num"], "") if isinstance(times, dict) else ""
+            lines.extend(format_test_card(d, str(t)))
+            lines.append("")
+    elif failed:
         lines.append(f"Failed tests ({len(failed)})")
         lines.append("")
         for d in failed:
             t = times.get(d["num"], "") if isinstance(times, dict) else ""
             lines.extend(format_test_card(d, str(t)))
             lines.append("")
-    if passed:
-        ids = ", ".join(f"#{d['num']}" for d in passed)
-        lines.append(f"Passed tests ({len(passed)}): {ids}")
+    quiet_pass = [d for d in passed if not has_io(d)]
+    if quiet_pass:
+        ids = ", ".join(f"#{d['num']}" for d in quiet_pass)
+        lines.append(f"Passed tests ({len(quiet_pass)}): {ids}")
         lines.append("")
     text = "\n".join(lines).rstrip() + "\n"
     with open(path, "w", encoding="utf-8") as f:
@@ -870,125 +1022,10 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-_HIDE_CUR = "\033[?25l"
-_SHOW_CUR = "\033[?25h"
-_RST = "\033[0m"
-_GREEN = "\033[32m"
-_BOLD = "\033[1m"
-_CONFETTI = list("*+.:x%o#")
-_POPS = ["🎉", "🎊", "✨"]
-_CONFETTI_COLORS = ("\033[33m", "\033[93m", "\033[35m", "\033[36m", "\033[91m", "\033[32m")
-_ACCEPTED_BANNER = [
-    r"  █████╗  ██████╗ ██████╗███████╗██████╗ ████████╗███████╗██████╗ ",
-    r" ██╔══██╗██╔════╝██╔════╝██╔════╝██╔══██╗╚══██╔══╝██╔════╝██╔══██╗",
-    r" ███████║██║     ██║     █████╗  ██████╔╝   ██║   █████╗  ██║  ██║",
-    r" ██╔══██║██║     ██║     ██╔══╝  ██╔═══╝    ██║   ██╔══╝  ██║  ██║",
-    r" ██║  ██║╚██████╗╚██████╗███████╗██║        ██║   ███████╗██████╔╝",
-    r" ╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚═╝        ╚═╝   ╚══════╝╚═════╝",
-]
-
-
-def _term_cols() -> int:
-    try:
-        return shutil.get_terminal_size().columns
-    except OSError:
-        return 80
-
-
-def _static_accept(title: str, extra: str) -> None:
-    name = title or "Problem"
-    print()
-    print(_paint(f"  🎉  ACCEPTED{extra}", True))
-    print(_paint(f"      {name} is done.", True))
-    print()
-
-
-def _animate_accept(title: str, extra: str) -> None:
-    """Party-popper / confetti frames around a FIGlet-style ACCEPTED banner."""
-    import random as _rng
-
-    rng = _rng.Random()
-    cols = max(40, min(_term_cols(), 72))
-    wide = cols >= 68
-    banner = _ACCEPTED_BANNER if wide else [
-        "  ***  A C C E P T E D  ***",
-        "      *  *  *  *  *  *",
-    ]
-    top, bot = 2, 2
-    height = top + len(banner) + bot
-    n_bits = 22 if wide else 14
-    bits = [
-        {
-            "x": rng.uniform(0, cols - 2),
-            "y": rng.uniform(0, height - 1),
-            "vy": rng.uniform(0.25, 0.7),
-            "ch": rng.choice(_CONFETTI),
-            "color": rng.choice(_CONFETTI_COLORS),
-        }
-        for _ in range(n_bits)
-    ]
-    subtitle = f"  🎉  {(title or 'Problem')}{extra}  🎉"
-    frames = 22
-    out = sys.stdout
-    out.write(_HIDE_CUR)
-    out.flush()
-    try:
-        for f in range(frames):
-            grid = [[" "] * cols for _ in range(height)]
-            color_at: dict[tuple[int, int], str] = {}
-            pop = _POPS[f % len(_POPS)]
-            # Emoji are wide; keep them off the 1-col grid so lines don't wrap.
-            corners = f"{pop}{' ' * max(0, cols - 4)}{pop}"
-            for b in bits:
-                b["y"] = (b["y"] + b["vy"]) % height
-                b["x"] = (b["x"] + rng.uniform(-0.4, 0.4)) % (cols - 1)
-                xi, yi = int(b["x"]), int(b["y"])
-                if grid[yi][xi] == " ":
-                    grid[yi][xi] = b["ch"]
-                    color_at[(yi, xi)] = b["color"]
-            for i, line in enumerate(banner):
-                row = top + i
-                start = max(0, (cols - len(line)) // 2)
-                for j, ch in enumerate(line):
-                    x = start + j
-                    if 0 <= x < cols:
-                        grid[row][x] = ch
-                        color_at[(row, x)] = _GREEN + _BOLD
-            if f:
-                out.write(f"\033[{height + 1}A")
-            out.write("\033[2K" + corners + "\n")
-            for y in range(1, height):
-                row = grid[y]
-                out.write("\033[2K")
-                prev = ""
-                for x, ch in enumerate(row):
-                    c = color_at.get((y, x), "")
-                    if c != prev:
-                        out.write(_RST + c)
-                        prev = c
-                    out.write(ch)
-                out.write(_RST + "\n")
-            out.write("\033[2K" + _GREEN + subtitle[:cols] + _RST + "\n")
-            out.flush()
-            time.sleep(0.055)
-    finally:
-        out.write(_SHOW_CUR)
-        out.flush()
-    print()
-
-
 def celebrate(title: str, score: str) -> None:
-    extra = f" ({score})" if score else ""
-    if not sys.stdout.isatty() or os.environ.get("CSES_NO_ANIM"):
-        _static_accept(title, extra)
-        return
-    print()
-    try:
-        _animate_accept(title, extra)
-    except (KeyboardInterrupt, OSError):
-        sys.stdout.write(_SHOW_CUR)
-        sys.stdout.flush()
-        _static_accept(title, extra)
+    from celebrate import play
+
+    play(title, score)
 
 
 def open_in_editor(path: str) -> None:
@@ -1010,7 +1047,7 @@ def open_in_editor(path: str) -> None:
 
 
 def offer_next(rel_dir: str) -> None:
-    hint = f"./scripts/run.sh {rel_dir}"
+    hint = f"cses run {os.path.basename(rel_dir)}"
     if not _interactive():
         print(f"  next     {rel_dir}")
         print(f"           {hint}")
@@ -1048,15 +1085,14 @@ def poll_status(submit_id: str, cookie_file: str, timeout: float = 120.0) -> str
 def submit_solution(
     prob_dir: str,
     *,
-    lang: str = DEFAULT_LANG,
-    option: str = DEFAULT_OPTION,
+    source: str | None = None,
+    lang: str | None = None,
+    option: str | None = None,
     cookie_file: str | None = None,
 ) -> int:
     cookie_file = cookie_file or cookie_path()
     prob_dir = os.path.abspath(prob_dir)
-    sol = os.path.join(prob_dir, "sol.cpp")
-    if not os.path.isfile(sol):
-        raise CurlError(f"no sol.cpp in {prob_dir}")
+    sol, lang, option = resolve_source(prob_dir, source=source, lang=lang, option=option)
     if os.path.getsize(sol) > 128 * 1024:
         raise CurlError("source is over CSES's 128 kB limit")
     if sol_looks_like_template(sol):
@@ -1073,7 +1109,7 @@ def submit_solution(
         page = fetch(f"{BASE}/problemset/task/{task}", cookie_file=cookie_file)
         csrf = extract_csrf(page)
     if not csrf:
-        raise CurlError("could not find csrf_token — try scripts/login.sh again")
+        raise CurlError("could not find csrf_token — try: cses login")
 
     print(f"submitting {sol}", flush=True)
     print(f"  user   {nick}", flush=True)
@@ -1144,6 +1180,11 @@ def submit_solution(
         banner = verdict if not score else f"{verdict}  ({score})"
         print()
         print(_paint(banner, False), flush=True)
+        table = format_summary_table(info)
+        if table:
+            print()
+            for line in table:
+                print(line)
         print_first_failure(info)
 
     saved = record_verdict(prob_dir, verdict, sid, info)
