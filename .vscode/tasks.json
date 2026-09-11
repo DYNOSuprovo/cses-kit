@@ -1,0 +1,32 @@
+{
+  // Run with Cmd+Shift+B (or Terminal > Run Build Task) while a sol.cpp is open.
+  // It compiles + tests the problem folder of the currently open file.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CSES: run tests for current problem",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/run.sh",
+      "args": ["${fileDirname}"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "CSES: run current problem interactively",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/run.sh",
+      "args": ["${fileDirname}", "-i"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "CSES: submit current problem",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/submit.sh",
+      "args": ["${fileDirname}"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    }
+  ]
+}

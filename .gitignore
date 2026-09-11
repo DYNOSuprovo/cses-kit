@@ -1,0 +1,15 @@
+# Compiled binaries
+problems/**/sol
+*.o
+*.out.bin
+.DS_Store
+
+# Local CSES checkout + secrets — never commit
+problems/
+.cses/
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
